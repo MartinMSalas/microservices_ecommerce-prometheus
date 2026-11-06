@@ -1,0 +1,79 @@
+// ==========================================
+// 1. Scrape Docker (flog)
+// ==========================================
+discovery.docker "flog_scrape" {
+	host             = "unix:///var/run/docker.sock"
+	refresh_interval = "5s"
+}
+
+discovery.relabel "flog_scrape" {
+	targets = []
+	
+	rule {
+	source_labels = ["__meta_docker_container_name"]
+	regex         = "/(.*)"
+	target_label  = "container"
+	}
+}
+
+loki.source.docker "flog_scrape" {
+	host             = "unix:///var/run/docker.sock"
+	targets          = discovery.docker.flog_scrape.targets
+	forward_to       = [loki.write.default.receiver]
+	relabel_rules    = discovery.relabel.flog_scrape.rules
+	refresh_interval = "5s"
+}
+
+// ==========================================
+// 2. Scrapeo de Logs del Sistema (opcional)
+// ==========================================
+local.file_match "system_logs" {
+	path_targets = [{"__path__" = "/var/log/*.log"}]
+	sync_period  = "5s"
+}
+
+loki.source.file "system_file_scrape" {
+	targets       = local.file_match.system_logs.targets
+	forward_to    = [loki.write.default.receiver]
+	tail_from_end = true
+}
+
+// ==========================================
+// 3. Scrap Microservices (CORREGIDO)
+// ==========================================
+
+// 3.1. Descubrimos los archivos
+local.file_match "microservices" {
+	// El /**/ busca recursivamente en todas las subcarpetas de /logs/
+	path_targets = [{"__path__" = "/logs/**/*.log"}]
+	sync_period  = "5s"
+}
+
+// 3.2. Aplicamos el relabel a los targets descubiertos
+discovery.relabel "microservices_logs" {
+	targets = local.file_match.microservices.targets
+	
+	rule {
+	source_labels = ["__path__"]
+	regex         = "/logs/([^/]+)/.*"
+	target_label  = "service"
+	}
+}
+
+// 3.3. Leemos los archivos usando los targets ya reetiquetados
+loki.source.file "microservices_scrape" {
+	targets       = discovery.relabel.microservices_logs.output
+	forward_to    = [loki.write.default.receiver]
+	tail_from_end = true
+}
+
+// ==========================================
+// 4. Destino (Loki Write)
+// ==========================================
+loki.write "default" {
+	endpoint {
+	url       = "http://gateway:3100/loki/api/v1/push"
+	tenant_id = "tenant1"
+	}
+	external_labels = {}
+}
